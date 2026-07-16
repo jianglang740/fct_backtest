@@ -60,7 +60,7 @@ fct_df = pd.concat(fct_dfs, axis=1)  # columns: ['mom_20d', 'mom_60d', 'mom_120d
 # ============================================================
 # 3. 保存因子数据（供回测框架读取）
 # ============================================================
-fct_df.to_parquet('fct_df.parquet')
+fct_df.to_parquet('mom_fct_df.parquet')
 
 print("因子构建完成！")
 print(f"因子列: {fct_df.columns.tolist()}")
