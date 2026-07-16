@@ -56,18 +56,46 @@ def preprocess_data(data):
     df.drop(['is_st','trade_days'], axis=1, inplace=True) #前面已经用这两列完成筛选，后续不再需要这两个标记字段，直接从数据表中删除这两列，精简数据维度
     return df
 '''
-results = factor_analysis(factor_df, price_data, periods=(1, 5, 10, 20), quantiles=10)
-price_data = pd.concat([price_data,fct_df],axis=1,join='inner')
+输入数据：
+
+......results = factor_analysis(factor_df, price_data, periods=(1, 5, 10, 20), quantiles=10)
+......price_data = pd.concat([price_data,fct_df],axis=1,join='inner')
 
 ......预处理
 
-factor_df = price_data['fct_2']
+......factor_df = price_data['fct_2']
 
 '''
 def factor_analysis(factor_series, price_df, periods=(1, 5, 10,20), quantiles=10):
     results = {} #创建一个空字典，用于存储每个持有期的因子分析结果，先将其暂存在内存当中
     price_aligned = pd.pivot_table(price_df['close_adj'].reset_index(),index='trade_date', columns='code', values='close_adj') #将价格数据透视为宽表，索引为交易日期，列为股票代码，值为对应的收盘价（复权后），方便后续计算未来收益率
-    
+        # =========================================================================
+        # 【核心时间轴偏移详解】—— 解答“为何同一日期却代表未来收益”
+        # 
+        # 假设 price_aligned 当前索引行对应的日期为 T 日。
+        # 
+        # 1. current_prices (shift(-1))：
+        #    -> 取 T+1 日的收盘价作为“买入价”。
+        #    -> 目的：T 日收盘时因子值已知，但已无法按 T 日收盘价交易，
+        #       因此用次日（T+1）价格模拟开盘买入，避免前视偏差。
+        # 
+        # 2. future_prices (shift(-period-1))：
+        #    -> 取 T+period+1 日的收盘价作为“卖出价”。
+        #    -> 例：若 period=5，则取 T+6 日价格，表示持有 5 个交易日。
+        # 
+        # 3. future_returns = (卖出价 / 买入价) - 1：
+        #    -> 计算出的收益率实际对应时间区间为 [T+1, T+period+1]。
+        #    -> 该数值会被存入索引为 T 日的行中。
+        # 
+        # 【重点】后续 merge 合并时：
+        #    factor_df 的 trade_date = T 日（因子值已知日）
+        #    returns_series 的 index = T 日（虽然内部数值来自未来，但标签贴在了 T 日）
+        #    合并后表格看着是同一日期，实则是将“T 日因子值”与“T 日开始的未来收益”强行配对。
+        # 
+        # 结论：这形成了严格的“当前截面特征 -> 未来区间收益”映射。
+        #      后续按 trade_date 分组计算 IC 时，衡量的是 T 日因子排序对 T 日后收益的预测能力，
+        #      完全正确，不存在用未来数据预测未来的逻辑错误。
+        # =========================================================================
     for period in periods: #遍历每个持有期，计算未来收益率，并将因子值和未来收益率合并为一个DataFrame，存储在results字典中
         future_prices = price_aligned.shift(-period-1) #取T+period+1日的价格作为卖出价
         current_prices = price_aligned.shift(-1)  # 取T+1日的价格作为买入价（假设T日收盘知道因子值，T+1日开盘买入，但这里用T+1收盘价代替，略有简化）
@@ -92,8 +120,69 @@ def factor_analysis(factor_series, price_df, periods=(1, 5, 10,20), quantiles=10
                 lambda x: pd.qcut(x, quantiles, labels=False, duplicates='drop') + 1
             ) #按日期对因子值进行分位数划分，使用 pd.qcut 将因子值分为 quantiles 个分位数，并将分位数编号从 1 开始（即 Q1、Q2、...、Q10），如果某一天的因子值不足以划分 quantiles 个分位数，则自动去掉重复的分位数标签
             results[period] = merged_df #将每个持有期的合并数据存储在 results 字典中，键为持有期，值为对应的 DataFrame，包含 trade_date、code、factor、return_{period}d 和 quantile 列
-    
+  
     return results
+
+'''
+假设某一天（2026-01-05）只有 4 只股票 A、B、C、D，我们设置 quantiles=4（切成 4 组，方便演示）
+
+原始数据（该日抽屉里的内容）：
+
+code	factor
+A	    1.2
+B	    -0.5
+C	    0.8
+D	    1.5
+
+执行 pd.qcut 的过程：
+
+排序：-0.5（B），0.8（C），1.2（A），1.5（D）
+
+等频切分成 4 份（每组 1 只股票）：
+
+第 1 组（最小）：B（-0.5）  → 编号 0
+
+第 2 组：C（0.8）           → 编号 1
+
+第 3 组：A（1.2）           → 编号 2
+
+第 4 组（最大）：D（1.5）   → 编号 3
+
+labels=False 返回：[0, 1, 2, 3]
+
++1 之后：变成 [1, 2, 3, 4]
+
+transform 自动对齐原顺序：因为原表顺序是 A, B, C, D，所以把编号按原索引贴回去：
+
+A 得到 3
+
+B 得到 1
+
+C 得到 2
+
+D 得到 4
+
+最终该日生成的 quantile 列结果：
+
+code	factor	quantile
+A	    1.2	    3
+B	    -0.5	1
+C	    0.8	    2
+D	    1.5	    4
+'''
+
+# results:
+
+'''
+trade_date (T日)	code	factor(T日因子值)	       return_5d (实际交易区间)	         quantile
+——————————————————————————————————————————————————————————————————————————————————————————————
+2026-01-05	        A	        1.20	             +4.95%(买入: 1/06, 卖出: 1/13)	      10
+2026-01-05	        B	        -0.50	             -5.94%(买入: 1/06, 卖出: 1/13)	       1
+2026-01-06	        C	        0.80	             +2.10%(买入: 1/07, 卖出: 1/14)	       7
+2026-01-06	        D	        1.50	             +1.50%(买入: 1/07, 卖出: 1/14)	       9
+——————————————————————————————————————————————————————————————————————————————————————————————
+'''
+
 
 def analyze_factor_performance(res_):
     perform_ = {} #创建一个空字典，用于存储每个持有期的因子表现分析结果，先将其暂存在内存当中
@@ -103,9 +192,13 @@ def analyze_factor_performance(res_):
         quantile_returns = quantile_returns.reset_index() #将多索引Series重置为普通DataFrame，列名为 trade_date、quantile、return_{period}d
         quantile_returns = pd.pivot_table(quantile_returns,index='trade_date',columns='quantile',values=f'return_{period}d') #将DataFrame透视为宽表，索引为 trade_date，列为 quantile，值为 return_{period}d 的平均值
         quantile_returns = quantile_returns.add(1).cumprod().sub(1).iloc[-1] #计算每个分位数的累计收益率，先加1再累乘再减1，得到每个分位数的总收益率
-        
+        #.cumprod()：沿时间轴（从上到下）累乘，得到每天的累计净值曲线
+
+
         long_short_return = quantile_returns.iloc[-1] - quantile_returns.iloc[0] #计算多空组合收益率，即最高分位数的累计收益率减去最低分位数的累计收益率
-        
+        #多空收益 = 做多 Top 组 + 做空 Bottom 组 的理论收益。如果这个值为正，说明因子具有正向选股能力（高因子值未来收益更高）
+
+
         ic_series = df.groupby('trade_date').apply(
             lambda x: stats.spearmanr(x['factor'], x[f'return_{period}d']).correlation 
             if len(x) > 5 else np.nan
@@ -116,7 +209,7 @@ def analyze_factor_performance(res_):
             ic_ir = ic_series.mean() / ic_series.std() if ic_series.std() > 0 else 0 
             
             perform_[period] = {
-                'quantile_returns': quantile_returns,
+                'quantile_returns': quantile_returns, 
                 'long_short_return': long_short_return,
                 'ic': ic,
                 'ic_ir': ic_ir,
@@ -126,7 +219,23 @@ def analyze_factor_performance(res_):
     
     return perform_ #返回绩效数据字典
 
-def calculate_portfolio_metrics(returns_series, period_days=1): 
+'''
+1. 画收益曲线分两种，容易混淆：
+- 画每日单日收益率：直接用当天原始收益率，不累乘，日期与收益率同行对应绘图；
+- 画账户净值/累计收益曲线（常用收益曲线）：必须用`1+当日收益率`逐行累乘。
+
+2. 最关键疑问：累乘出来的净值该匹配哪一天日期？
+计算得出的当期净值，就和产生这笔收益率的当天日期放在同一行、一一对齐。
+初始基准净值1，是期初起跑线，不绑定任何交易日；
+每一行日期+本行收益率，计算出本行净值，本行日期绑定本行净值，绘图不会时间错位。
+
+3. 简单操作口诀
+期初先设净值=1；
+下一行净值=上一行净值×(1+本行当日收益率)；
+净值与本行日期配对作图。
+'''
+
+def calculate_portfolio_metrics(returns_series, period_days=1):  
     if len(returns_series) == 0:
         return {}
     
@@ -134,12 +243,12 @@ def calculate_portfolio_metrics(returns_series, period_days=1):
     cumulative_return = cumulative_curve.iloc[-1] - 1 if len(cumulative_curve) > 0 else 0 #计算总累计收益率，即最后一天的累计收益率减去1，如果累计曲线为空，则累计收益率为0
     
     if len(returns_series) > 0: #计算年化收益率，假设一年有252个交易日，年化收益率 = (1 + 累计收益率) ^ (252 / 总天数) - 1
-        total_days = len(returns_series) * period_days
+        total_days = len(returns_series) * period_days #把“压缩后的样本数量”还原成“真实经历的自然交易日天数”，确保年化收益率和年化波动率的计算符合真实的时间尺度，不会因为非重叠采样而失真
         annual_return = (1 + cumulative_return) ** (252 / total_days) - 1
     else:
         annual_return = 0 #如果收益序列为空，则年化收益率为0
     
-    running_max = cumulative_curve.expanding().max() #计算累计收益曲线的滚动最大值，即每一天的累计收益率的历史最高点
+    running_max = cumulative_curve.expanding().max() #计算累计收益曲线的滚动最大值，即每一天的累计收益率的历史最高点，rolling(window=3)固定大小（比如只看最近3天），计算移动平均线（MA5、MA10）；expanding()从第1天到当天的所有数据（越往后窗口越大），计算历史最高点、累计总和、累计均值
     drawdown = (cumulative_curve - running_max) / running_max #计算回撤率，即每一天的累计收益率与历史最高点的差值除以历史最高点，得到一个负数序列，表示每一天的回撤幅度
     max_drawdown = abs(drawdown.min()) #计算最大回撤，即回撤率的最小值的绝对值，表示投资组合在持有期内可能遭受的最大损失比例
     

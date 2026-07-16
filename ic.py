@@ -54,3 +54,4 @@ plt.tight_layout()  # 自动调整布局
 plt.savefig("IC时序图.png", dpi=300, bbox_inches="tight")
 # 显示图表
 plt.show()
+
