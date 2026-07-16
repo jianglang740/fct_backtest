@@ -1,0 +1,23 @@
+# 大文件（Parquet 数据）
+*.parquet
+
+# 回测输出产物
+单因子回测统计结果.xlsx
+IC时序图.png
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
