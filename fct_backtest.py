@@ -379,7 +379,7 @@ price_data = pd.read_parquet('price_data.parquet')
 fct_df = pd.read_parquet('fct_df.parquet')
 factor_names = fct_df.columns
 price_data = pd.concat([price_data,fct_df],axis=1,join='inner') # 将因子数据与价格数据合并，只保留两者共有的股票和日期，确保数据对齐，避免因缺失值导致的计算错误
-
+#把 fct_df 的所有列，直接横向追加到 price_data右边，结果重新赋值给 price_data 覆盖原数据
 
 #### 数据处理 ####
 price_data[factor_names] = extreme_MAD(price_data[factor_names]) #对因子数据进行极值处理，使用中位数绝对偏差（MAD）方法，将因子值限制在中位数上下5.2倍MAD的范围内，减少异常值对回测结果的影响
@@ -403,7 +403,7 @@ print("\n=== 详细统计结果汇总 ===")
 print(summary_df.to_string(index=False, float_format='%.4f'))
 
 # 绘制传统因子表现图
-plot_factor_performance(performance)
+plot_factor_performance(performance) 
 plot_quantile_returns_separate(performance)
 
 
