@@ -1,8 +1,3 @@
-
-# 回测输出产物
-单因子回测统计结果.xlsx
-IC时序图.png
-
 # Python
 __pycache__/
 *.py[cod]
