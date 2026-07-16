@@ -55,8 +55,16 @@ def preprocess_data(data):
     df = df[mask].copy() #只取出 mask 为 True 的行，完成样本池初次过滤
     df.drop(['is_st','trade_days'], axis=1, inplace=True) #前面已经用这两列完成筛选，后续不再需要这两个标记字段，直接从数据表中删除这两列，精简数据维度
     return df
+'''
+results = factor_analysis(factor_df, price_data, periods=(1, 5, 10, 20), quantiles=10)
+price_data = pd.concat([price_data,fct_df],axis=1,join='inner')
 
-def factor_analysis(factor_series, price_df, periods=(1, 5, 10), quantiles=10):
+......预处理
+
+factor_df = price_data['fct_2']
+
+'''
+def factor_analysis(factor_series, price_df, periods=(1, 5, 10,20), quantiles=10):
     results = {} #创建一个空字典，用于存储每个持有期的因子分析结果，先将其暂存在内存当中
     price_aligned = pd.pivot_table(price_df['close_adj'].reset_index(),index='trade_date', columns='code', values='close_adj') #将价格数据透视为宽表，索引为交易日期，列为股票代码，值为对应的收盘价（复权后），方便后续计算未来收益率
     
@@ -76,21 +84,21 @@ def factor_analysis(factor_series, price_df, periods=(1, 5, 10), quantiles=10):
                            left_on=['trade_date', 'code'], 
                            right_index=True) #按日期和股票代码合并因子值和未来收益，得到一个新的DataFrame，包含 trade_date、code、factor、return_{period}d 四列
         
-        merged_df = merged_df.dropna(subset=['factor', f'return_{period}d'])
+        merged_df = merged_df.dropna(subset=['factor', f'return_{period}d']) #删除因子值或未来收益为 NaN 的行，确保后续计算的有效性
         merged_df = merged_df.sort_values('trade_date') #按日期排序
         
         if len(merged_df) > 0:
             merged_df['quantile'] = merged_df.groupby('trade_date')['factor'].transform(
                 lambda x: pd.qcut(x, quantiles, labels=False, duplicates='drop') + 1
-            )
-            results[period] = merged_df
+            ) #按日期对因子值进行分位数划分，使用 pd.qcut 将因子值分为 quantiles 个分位数，并将分位数编号从 1 开始（即 Q1、Q2、...、Q10），如果某一天的因子值不足以划分 quantiles 个分位数，则自动去掉重复的分位数标签
+            results[period] = merged_df #将每个持有期的合并数据存储在 results 字典中，键为持有期，值为对应的 DataFrame，包含 trade_date、code、factor、return_{period}d 和 quantile 列
     
     return results
 
 def analyze_factor_performance(res_):
     perform_ = {} #创建一个空字典，用于存储每个持有期的因子表现分析结果，先将其暂存在内存当中
     
-    for period, df in res_.items():
+    for period, df in res_.items(): #遍历每个持有期的合并数据 DataFrame，计算分位数收益率、多空组合收益率、IC均值、ICIR和IC时间序列，并将结果存储在 perform_ 字典中
         quantile_returns = df.groupby(['trade_date','quantile'])[f'return_{period}d'].mean() #按日期和分位数计算平均收益，得到一个多索引Series，索引为 (trade_date, quantile)，值为 return_{period}d 的平均值
         quantile_returns = quantile_returns.reset_index() #将多索引Series重置为普通DataFrame，列名为 trade_date、quantile、return_{period}d
         quantile_returns = pd.pivot_table(quantile_returns,index='trade_date',columns='quantile',values=f'return_{period}d') #将DataFrame透视为宽表，索引为 trade_date，列为 quantile，值为 return_{period}d 的平均值
