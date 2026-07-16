@@ -12,6 +12,7 @@ fct_backtest/
 ├── ic.py                          # IC 时间序列可视化脚本
 ├── price_data.parquet             # 行情数据（Git LFS 托管）
 ├── fct_df.parquet                 # 因子数据（Git LFS 托管）
+|—— mom_fct_df.parquet			   # 20日动量因子（Git LFS 托管）
 ├── 图片/                          # 回测输出图表
 │   ├── Figure_1~5.png             # 分层收益曲线 + 绩效仪表盘
 │   └── IC时序图.png               # IC 时间序列图
