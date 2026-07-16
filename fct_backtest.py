@@ -76,7 +76,7 @@ def factor_analysis(factor_series, price_df, periods=(1, 5, 10,20), quantiles=10
         factor_df.columns = ['trade_date', 'code', 'factor']  #将因子序列（多索引Series）重置为普通DataFrame，并重命名列
         
         future_returns = future_returns.iloc[::period].dropna(axis=0,how='all') #iloc[::period] —— 每隔 period 行取一个日期，目的是避免样本重叠（例如持有5天，只取第1、6、11...天的数据）。这会大幅减少样本量，但使收益序列独立同分布，便于统计ICIR。
-
+        #只保留T、T+period、T+2*period...的收益率，避免样本重叠，减少自相关性。dropna(axis=0,how='all') —— 删除所有股票收益率都为 NaN 的日期行，确保后续计算的有效性
 
         returns_series = future_returns.stack() #stack() 将宽表变回长表（日期、股票、收益），然后按日期+股票合并因子值和未来收益
         returns_series.name = f'return_{period}d' #给收益序列命名，即列名为 return_1d、return_5d、return_10d 等
