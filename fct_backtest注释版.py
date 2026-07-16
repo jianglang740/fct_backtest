@@ -197,7 +197,23 @@ def analyze_factor_performance(res_):
 
         long_short_return = quantile_returns.iloc[-1] - quantile_returns.iloc[0] #计算多空组合收益率，即最高分位数的累计收益率减去最低分位数的累计收益率
         #多空收益 = 做多 Top 组 + 做空 Bottom 组 的理论收益。如果这个值为正，说明因子具有正向选股能力（高因子值未来收益更高）
+        '''
+        多空组合的策略逻辑就是 买入 Top 组（因子值最大），卖出 Bottom 组（因子值最小）。
 
+        代码里只做了 Q10 - Q1 的减法，是因为在量化回测的数学建模中，这个减法精确模拟了“等权重多空对冲组合”的每日净值变化。我们算一笔账就懂了：
+
+        假设总资金为 2 块钱（1 块做多，1 块做空）：
+
+        做多 Top 组：投入 1 块，如果 Top 组涨了 10%，这边赚了 0.1 块。
+
+        做空 Bottom 组：投入 1 块（借股票卖掉），如果 Bottom 组涨了 8%，因为你是做空，这边亏了 0.08 块。
+
+        整个组合的总盈亏 = 0.1 - 0.08 = 0.02 块，也就是 10% - 8% = 2%。
+
+        而反之如果做多组跌了做空组涨了，或者做多组涨了做空组跌了，以及其它情况，最终的盈亏都是 Q10 - Q1 的差值。
+
+        所以，Q10 - Q1 这个差值，在数学上直接等价于“等权重多空组合”的净收益率。正因为计算这么简洁，量化界才直接用这个差值代表多空组合的收益表现
+        '''
 
         ic_series = df.groupby('trade_date').apply(
             lambda x: stats.spearmanr(x['factor'], x[f'return_{period}d']).correlation 
@@ -280,7 +296,25 @@ def calculate_portfolio_metrics(returns_series, period_days=1):
 
 def determine_factor_direction(perfo_): 
     direction_info = {} #创建一个空字典，用于存储每个持有期的因子方向信息
-    
+    '''
+    1. 正向因子（Positive Factor）
+    定义：因子值越大，未来收益率越高。
+
+    特征：Q10（高因子组） - Q1（低因子组） > 0
+
+    操作：应该买入高因子值的股票（Top组）。
+
+    现实例子：动量因子（过去涨得多的，未来继续涨）；盈利能力因子（ROE高的公司，股价表现好）。
+
+    2. 负向因子（Negative Factor）
+    定义：因子值越小，未来收益率越高（即因子值与未来收益成反比）。
+
+    特征：Q10（高因子组） - Q1（低因子组） < 0
+
+    操作：应该买入低因子值的股票（Bottom组），做空高因子值的股票。
+
+    现实例子：市盈率（PE）（PE低的股票更便宜，未来上涨空间大，即“价值因子”）；换手率（换手率越低，未来表现通常越好）
+    '''
     for period, perf in perfo_.items(): #遍历每个持有期的绩效数据字典，获取多空组合收益率，并根据其正负值判断因子方向
         long_short_return = perf['long_short_return'] #获取多空组合收益率，即最高分位数的累计收益率减去最低分位数的累计收益率
         if long_short_return > 0:
