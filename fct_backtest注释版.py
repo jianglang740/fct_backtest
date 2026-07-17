@@ -414,7 +414,7 @@ def generate_summary_statistics(perform_, output_path='因子回测统计结果.
     return summary_df #返回汇总统计数据的DataFrame，包含每个持有期的因子方向、IC、ICIR、累计收益率、年化收益率、最大回撤和夏普比率等指标
 
 def plot_quantile_returns_separate(perform_): #绘制每个持有期的分位数收益率曲线，区分Top组和Bottom组
-    periods = list(perform_.keys()) #获取所有持有期的列表
+    periods = list(perform_.keys()) #获取所有持有期的列表，即返回字典 perform_ 的键列表，便于后续遍历每个持有期进行绘图
     
     for period in periods: #遍历每个持有期，获取对应的原始数据DataFrame，并按日期和分位数计算平均收益，得到一个透视表形式的DataFrame，索引为日期，列为分位数，值为对应的平均收益率
         df = perform_[period]['data'] #获取每个持有期的原始数据DataFrame，包括 trade_date、code、factor、return_{period}d 和 quantile 列
