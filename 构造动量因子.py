@@ -23,7 +23,7 @@ df.drop(['is_st', 'trade_days'], axis=1, inplace=True)
 #   b) 对每只股票，计算过去N天的收益率：close / close.shift(N) - 1
 #   c) 堆叠回长表格式，作为因子值
 
-# 提取收盘价，透视成宽表，unstack()：长表 → 宽表（行索引里的某一层，拉出来变成列索引）
+# 提取收盘价，透视成宽表，unstack()：长表 → 宽表（行索引里的某一层，拉出来变成列索引）stack()：宽表 → 长表（列索引压进行索引）
 close_wide = df['close_adj'].unstack('code')  # index=trade_date, columns=code
 
 # 按日期排序（确保 shift 操作正确）
