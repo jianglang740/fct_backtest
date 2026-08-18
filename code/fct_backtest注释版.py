@@ -3,6 +3,8 @@
 Created on Tue Dec  2 13:40:27 2025
 
 @author: andrew
+
+当前框架默认传入两份数据文件，即一份价格数据（包含股票代码，交易日期，收盘价、复权价、涨跌幅等），一份因子数据（包含因子值、股票代码，交易日期等）
 """
 #前言：
 '''
@@ -24,10 +26,11 @@ plt.rcParams['axes.unicode_minus'] = False
 
 
 ###############################################################################
-#### func ####
+
+#### 数据处理函数 ####
 
 '''
-  当前实现是全局 MAD 缩尾——中位数和 MAD 都是对全部时间段的所有股票一起计算的，得到一个全局上下界：
+  当前实现是因子全局 MAD 缩尾——中位数和 MAD 都是对全部时间段的所有股票一起计算的，得到一个全局上下界：
 
   median = dt.quantile(0.5)           # 全样本中位数（跨时间+股票）
   new_median = (abs(dt - median)).quantile(0.5)  # 全样本 MAD
@@ -35,6 +38,7 @@ plt.rcParams['axes.unicode_minus'] = False
   而量化回测中更常见的做法是每日截面 MAD 缩尾（在每个交易日内，对该日所有股票的因子值做缩尾）。
   两种方法的差异在于：全局缩尾使用的是静态阈值，截面缩尾使用的是动态阈值。如果因子本身存在明显的 时间趋势（例如某些因子在市场不同阶段分布不同），全局缩尾可能在某些时段过宽或过窄。
 '''
+
 def extreme_MAD(dt, n=5.2):
     median = dt.quantile(0.5) #quantile(q) 用于计算数据的分位数（四分位数 / 百分位数），可以理解为：给定一个 0~1 之间的比例q，返回把数据集从小到大排序后，排在前q比例位置上的数值
     new_median = (abs((dt - median)).quantile(0.5)) #计算每个值到该股票中位数的绝对偏差，再取中位数，得到该股票的 MAD（绝对中位差）
@@ -42,16 +46,19 @@ def extreme_MAD(dt, n=5.2):
     dt_down = median - n*new_median #下界
     return dt.clip(dt_down, dt_up, axis=1) #将数据限制在上下界之间
 
+
 '''
 pandas.DataFrame.clip(lower, upper, axis) 是截断缩尾（Winsorize）函数：
 把数据里小于下界 lower的数值，强制替换成 lower；
 把大于上界 upper的数值，强制替换成 upper；
 落在上下界中间的数据保持原值不变。
 '''
+
 def standardize_z(dt):
     mean = dt.mean() #求均值
     std = dt.std() #求标准差
     return (dt - mean)/std #标准化
+
 
 def preprocess_data(data):
     df = data.copy() #复制数据，深拷贝一份数据，避免修改原DataFrame
@@ -94,16 +101,19 @@ def factor_analysis(factor_series, price_df, periods=(1, 5, 10,20), quantiles=10
         # 【重点】后续 merge 合并时：
         #    factor_df 的 trade_date = T 日（因子值已知日）
         #    returns_series 的 index = T 日（虽然内部数值来自未来，但标签贴在了 T 日）
-        #    合并后表格看着是同一日期，实则是将“T 日因子值”与“T 日开始的未来收益”强行配对。
+
+        #    合并后表格看着是同一日期，实则是将“T 日因子值”与“T 日开始的未来收益”强行配对！！！！！！！！
         # 
         # 结论：这形成了严格的“当前截面特征 -> 未来区间收益”映射。
         #      后续按 trade_date 分组计算 IC 时，衡量的是 T 日因子排序对 T 日后收益的预测能力，
         #      完全正确，不存在用未来数据预测未来的逻辑错误。
         # =========================================================================
+
     for period in periods: #遍历每个持有期，计算未来收益率，并将因子值和未来收益率合并为一个DataFrame，存储在results字典中
         future_prices = price_aligned.shift(-period-1) #取T+period+1日的价格作为卖出价
         current_prices = price_aligned.shift(-1)  # 取T+1日的价格作为买入价（假设T日收盘知道因子值，T+1日开盘买入，但这里用T+1收盘价代替，略有简化）
         future_returns = (future_prices / current_prices - 1) #持有期收益 = (卖出价 / 买入价) - 1，即从T+1日到T+period+1日的收益（持有period天），从 T+1 日到 T+period+1 日。因为 shift(-period-1) 取的是第 t+period+1 行的价格
+        
         factor_df = factor_series.reset_index() #将因子序列（多索引Series）重置为普通DataFrame，并重命名列
         factor_df.columns = ['trade_date', 'code', 'factor']  #将因子序列（多索引Series）重置为普通DataFrame，并重命名列
         

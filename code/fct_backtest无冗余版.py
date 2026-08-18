@@ -353,13 +353,13 @@ def plot_factor_performance(perfor_):
 #### data & fct ####
 
 #### 读取数据 ####
-price_data = pd.read_parquet('price_data.parquet')
+price_data = pd.read_parquet('code/price_data.parquet')
 
 #### 构建因子 ####
 
 
 #### 添加因子 ####
-fct_df = pd.read_parquet('mom_fct_df.parquet')
+fct_df = pd.read_parquet('code/fct_df.parquet')
 factor_names = fct_df.columns
 price_data = pd.concat([price_data,fct_df],axis=1,join='inner')
 
@@ -371,7 +371,7 @@ price_data = preprocess_data(price_data)
 
 #### 因子回测 ####
 # 测试 fct_1
-factor_df = price_data['mom_20d']
+factor_df = price_data['fct_1']
 
 
 ###############################################################################
@@ -380,7 +380,7 @@ print('*******************')
 print(price_data)
 results = factor_analysis(factor_df, price_data, periods=(1, 5, 10, 20), quantiles=10)
 performance = analyze_factor_performance(results)
-summary_df = generate_summary_statistics(performance, '20日动量因子回测统计结果.xlsx')
+summary_df = generate_summary_statistics(performance, 'code/因子回测统计结果.xlsx')
 
 print("\n=== 详细统计结果汇总 ===")
 print(summary_df.to_string(index=False, float_format='%.4f'))
