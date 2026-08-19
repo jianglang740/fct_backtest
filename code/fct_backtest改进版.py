@@ -50,8 +50,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 #   FCT_FACTOR=fct_1 FCT_REBALANCE=monthly FCT_PERIODS=1 FCT_NEUTRALIZE=None \
 #   python fct_backtest改进版.py
 FACTOR = os.environ.get('FCT_FACTOR', 'fct_2')                     # 待回测因子列名
-REBALANCE = os.environ.get('FCT_REBALANCE', 'auto')                # 'auto'|'weekly'|'monthly'|'daily'
-PERIODS = tuple(int(x) for x in os.environ.get('FCT_PERIODS', '1,5,10,20').split(','))
+REBALANCE = os.environ.get('FCT_REBALANCE', 'monthly')                # 'auto'|'weekly'|'monthly'|'daily'
+# 默认持有期按调仓方式自适应：
+#   auto/daily -> 天频 (1,5,10,20) 天；weekly/monthly -> 默认只测 1 个调仓窗口（持 1 周/1 个月）。
+# 多窗口需显式 FCT_PERIODS（如月频 FCT_PERIODS=1,3,6,12 = 持有 1/3/6/12 个月）。
+_PERIOD_DEFAULT = {'auto': (1, 5, 10, 20), 'daily': (1, 5, 10, 20),
+                   'weekly': (1,), 'monthly': (1,)}
+PERIODS = tuple(int(x) for x in os.environ.get(
+    'FCT_PERIODS', ','.join(str(p) for p in _PERIOD_DEFAULT.get(REBALANCE, (1,)))).split(','))
 QUANTILES = int(os.environ.get('FCT_QUANTILES', '10'))             # 分组数
 _neutralize_env = os.environ.get('FCT_NEUTRALIZE', 'mktcap_industry')
 NEUTRALIZE = None if _neutralize_env in ('None', 'none', '') else _neutralize_env
@@ -152,6 +158,28 @@ def rebalance_period_days(rebalance, period):
     return int(period)
 
 
+def _strategy_period_days(rebalance, period):
+    """策略窗口收益率序列的年化折算天数。
+
+    auto（非重叠）：每段窗口即持有期，折 period 天；
+    日历化调仓：策略收益序列按"1 个调仓窗口"采样（daily=1 天 / weekly=5 / monthly=21），
+      与持有期 period 无关——重叠场景下若仍按 period 折算会把总天数虚增 period 倍、年化失真。
+    """
+    if rebalance == 'auto':
+        return int(period)
+    return rebalance_period_days(rebalance, 1)
+
+
+def period_unit(rebalance):
+    """持有期标签单位：auto/daily -> 天，weekly -> 周，monthly -> 月。"""
+    return {'monthly': '月', 'weekly': '周'}.get(rebalance, '天')
+
+
+def period_file_suffix(rebalance):
+    """持有期文件后缀（ASCII，便于跨平台）：auto/daily -> d，weekly -> w，monthly -> m。"""
+    return {'monthly': 'm', 'weekly': 'w'}.get(rebalance, 'd')
+
+
 def factor_analysis(factor_series, price_df, periods=(1, 5, 10, 20), quantiles=10,
                     rebalance='auto'):
     """核心回测：基于调仓窗口计算非重叠持仓收益，并做每日截面分组。
@@ -162,14 +190,19 @@ def factor_analysis(factor_series, price_df, periods=(1, 5, 10, 20), quantiles=1
       auto 模式：R 每隔 period 交易日取一个，卖出 = 下一 R 的次日 -> 严格复现原 shift(-period-1)/shift(-1)。
       monthly 模式：R = 每月最后交易日，period=1 即"月末因子值 -> 下月收益"的非重叠月频窗口；
                     period=2 表示每月调仓、持有 2 个月（卖出 = 第 2 个下月末的次日）。weekly 同理。
+      period>1 的日历化调仓会产生重叠窗口，绩效指标（累计/多空/年化/夏普/回撤）由
+      _overlapping_strategy_returns 按"全持仓·等权·重叠加仓"重建，见 _factor_metrics。
+    返回 (results, ctx)，ctx = {'price_aligned', 'reb_dates: {period: R}}。
     """
     price_aligned = pd.pivot_table(
         price_df['close_adj'].reset_index(), index='trade_date', columns='code', values='close_adj')
     all_dates = price_aligned.index
 
     results = {}
+    reb_by_period = {}
     for period in periods:
         reb_dates = build_rebalance_dates(all_dates, rebalance, period)
+        reb_by_period[period] = reb_dates
         # auto 的 R 已被抽稀（每隔 period 天），卖出 = 下一 R；其余模式卖出 = period 个窗口后的 R
         exit_shift = 1 if rebalance == 'auto' else period
         next_reb = pd.Series(reb_dates).shift(-exit_shift).to_numpy()
@@ -207,18 +240,20 @@ def factor_analysis(factor_series, price_df, periods=(1, 5, 10, 20), quantiles=1
         if len(merged) > 0:
             results[period] = merged
 
-    return results
+    # 返回价格矩阵与各持有期的完整调仓日序列，供"重叠加仓"真实策略收益重建使用
+    return results, {'price_aligned': price_aligned, 'reb_dates': reb_by_period}
 
 
 ###############################################################################
 #### 统计检验：Fama-MacBeth 截面回归 + Newey-West 自相关修正 ####
 ###############################################################################
 
-def newey_west_se(x, lags=None):
+def newey_west_se(x, lags=None, min_lags=0):
     """Newey-West HAC 修正标准误（针对均值），修正序列自相关导致的 t 值虚高。
 
     x: 一维收益/斜率/IC 序列。返回 mean(x) 的 HAC 标准误。
-    lag 选择：lags = floor(4 * (n/100)^(2/9))，Bartlett 权重。
+    lag 选择：lags = floor(4 * (n/100)^(2/9))，Bartlett 权重；
+             重叠窗口序列存在 MA(period-1) 结构，可用 min_lags 强制滞后阶数不低于重叠长度。
     """
     x = np.asarray(x, dtype=float)
     x = x[~np.isnan(x)]
@@ -227,6 +262,7 @@ def newey_west_se(x, lags=None):
         return np.nan
     if lags is None:
         lags = int(np.floor(4 * (n / 100.0) ** (2.0 / 9.0)))
+    lags = max(lags, int(min_lags))
     lags = max(0, min(lags, n - 2))
     xc = x - x.mean()
     var = np.mean(xc * xc)                       # gamma_0
@@ -236,11 +272,12 @@ def newey_west_se(x, lags=None):
     return np.sqrt(var / n)
 
 
-def fama_macbeth_regression(df, factor_col, ret_col, control_cols=None):
+def fama_macbeth_regression(df, factor_col, ret_col, control_cols=None, min_lags=0):
     """逐调仓日截面 OLS：ret ~ factor (+ controls)，收集斜率做 Newey-West t 检验。
 
     返回: mean_slope(每单位因子收益)、slope_bp(×10000，基点)、t_naive、t_nw、n_dates、
           slope_series(逐调仓日斜率序列，供可视化)。
+    min_lags: 重叠窗口时 NW 滞后阶数下限（覆盖 MA(period-1) 自相关）。
     """
     slope_dates, slopes = [], []
     for date, sub in df.groupby('trade_date'):
@@ -267,7 +304,7 @@ def fama_macbeth_regression(df, factor_col, ret_col, control_cols=None):
                 'slope_series': slope_series}
     mean_slope = slopes.mean()
     se_naive = slopes.std(ddof=1) / np.sqrt(len(slopes))
-    se_nw = newey_west_se(slopes)
+    se_nw = newey_west_se(slopes, min_lags=min_lags)
     return {
         'mean_slope': mean_slope,
         'slope_bp': mean_slope * 10000,
@@ -330,17 +367,92 @@ def _quantile_transform(s, n):
         return pd.Series(np.nan, index=s.index)
 
 
-def _factor_metrics(df, period, factor_col, quantiles=10):
-    """对指定因子列计算一套完整指标（分层收益 / IC / FM 回归 / NW t 值）。"""
+def _overlapping_strategy_returns(d, price_aligned, reb_dates, period, rebalance):
+    """按"全持仓·等权·重叠加仓"重建真实策略的逐窗口收益（重叠窗口专用）。
+
+    背景：daily/weekly/monthly + period>1 时相邻持有窗口重叠，若对每个调仓日的整段
+    持有期收益直接 cumprod，重叠部分被重复复利，得到天文数字的虚假累计/多空收益
+    （实测 daily 20 天曾算出 -844 万%、weekly 16 周 -5.5 万%）。本函数重建真实口径：
+      策略在每个调仓窗口持有最近 s=period 个开仓日选出的等权组合（各 1/s 权重，全持仓），
+      窗口 j 的策略收益 w_j = (1/s)·Σ_{i=j-s+1..j} R[i,j]，
+      其中 R[i,j] = 第 i 个开仓日选出的组合在窗口 j 的等权收益
+      （窗口 j 收益 = 调仓日 j+1 的次日收盘 / 调仓日 j 的次日收盘 − 1）。
+    少数开仓日无有效分组时按实际形成仓位归一化（视为资本未投足而回补）。
+    无重叠场景（auto / period=1）不应调用（s=1 时本式退化为单组自身窗口收益，与旧逻辑一致）。
+
+    返回 {quantile: pd.Series(策略窗口收益, index=对应调仓日 R[j])}。
+    """
+    s = 1 if rebalance == 'auto' else period
+    all_dates = price_aligned.index
+    R = pd.DatetimeIndex(reb_dates)
+    pos = all_dates.get_indexer(R)
+    ok = (pos >= 0) & (pos + 1 < len(all_dates))
+    R = R[ok]
+    boundary = all_dates[pos[ok] + 1]                 # 每个调仓日的次日（窗口左边界买入价）
+    prices = price_aligned.loc[boundary]              # (n_R, n_stock)
+    W = prices.iloc[1:].to_numpy(dtype=float) / prices.iloc[:-1].to_numpy(dtype=float) - 1
+    n_R = R.shape[0]
+    m = n_R - s                                       # 完整开仓日数（存在卖出日的调仓日）
+    if m < s:                                         # 窗口数不足，无法形成满仓策略
+        return {}
+    n_stock = prices.shape[1]
+    codes = list(price_aligned.columns)
+    stock_idx = {c: i for i, c in enumerate(codes)}
+
+    dq = d[['trade_date', 'code', 'quantile']].dropna(subset=['quantile'])
+    dq = dq[dq['trade_date'].isin(R)]                 # 只保留落在调仓日上的仓位
+    if len(dq) == 0:
+        return {}
+    anchor_pos = {a: i for i, a in enumerate(R)}
+    out = {}
+    for qq in sorted(dq['quantile'].unique()):
+        sub = dq[dq['quantile'] == qq]
+        row_ids = np.array([anchor_pos[a] for a in sub['trade_date']])
+        col_ids = np.array([stock_idx[c] for c in sub['code']])
+        wgt = 1.0 / sub.groupby('trade_date')['code'].transform('count').to_numpy()  # 组内等权
+        M = np.zeros((n_R, n_stock))
+        M[row_ids, col_ids] = wgt
+        row_norm = np.bincount(row_ids, minlength=n_R) > 0   # 该调仓日是否形成了仓位
+        cumM = np.vstack([np.zeros((1, n_stock)), np.cumsum(M, axis=0)])
+        cumN = np.concatenate([[0], np.cumsum(row_norm.astype(int))])
+        jj = np.arange(s - 1, m)                      # 策略窗口 j = s-1 .. m-1
+        lo = jj - (s - 1)                             # j-s+1
+        hi = jj + 1
+        cnt = cumN[hi] - cumN[lo]                     # 窗口内有效仓位数
+        B = (cumM[hi] - cumM[lo]) / cnt[:, None]      # (|jj|, n_stock)，组内等权、跨期等权
+        Wb = W[jj]                                    # 对应窗口的股票收益
+        Wnan = ~np.isfinite(Wb)                       # 停牌/缺失边界价 -> 该窗口不参与（未知）
+        num = (B * np.where(Wnan, 0.0, Wb)).sum(axis=1)
+        den = (B * (~Wnan)).sum(axis=1)
+        w = np.full(len(jj), np.nan)
+        good = (cnt > 0) & np.isfinite(den) & (den > 0)
+        if good.any():
+            w[good] = num[good] / den[good]
+        out[qq] = pd.Series(w, index=pd.Index(R[jj], name='trade_date'), name=qq)
+    return out
+
+
+def _factor_metrics(df, period, factor_col, quantiles=10,
+                    price_aligned=None, reb_dates=None, rebalance='auto'):
+    """对指定因子列计算一套完整指标（分层收益 / IC / FM 回归 / NW t 值）。
+
+    分层收益在重叠场景（日历化调仓 + period>1）用 _overlapping_strategy_returns 重建
+    真实策略收益，避免对重叠窗口连乘产生虚假累计；无重叠（auto / period=1）时保持旧逻辑。
+    """
     ret_col = f'return_{period}d'
     d = df.dropna(subset=[factor_col, ret_col]).copy()
     d['quantile'] = d.groupby('trade_date')[factor_col].transform(
         lambda x: _quantile_transform(x, quantiles))
+    s = 1 if rebalance == 'auto' else period
 
     # 分层收益
-    q = d.groupby(['trade_date', 'quantile'])[ret_col].mean().reset_index()
-    q = pd.pivot_table(q, index='trade_date', columns='quantile', values=ret_col)
-    q = q.sort_index()
+    if s > 1 and price_aligned is not None and reb_dates is not None and len(d):
+        strat = _overlapping_strategy_returns(d, price_aligned, reb_dates, period, rebalance)
+        q = pd.DataFrame(strat).sort_index() if strat else pd.DataFrame(dtype=float)
+    else:
+        q = d.groupby(['trade_date', 'quantile'])[ret_col].mean().reset_index()
+        q = pd.pivot_table(q, index='trade_date', columns='quantile', values=ret_col)
+        q = q.sort_index()
     q_cum = q.add(1).cumprod().sub(1).iloc[-1] if len(q) else pd.Series(dtype=float)
 
     out = {'returns_pivot': q, 'quantile_returns': q_cum}
@@ -349,16 +461,17 @@ def _factor_metrics(df, period, factor_col, quantiles=10):
                     'ic': np.nan, 'ic_ir': np.nan, 'ic_series': pd.Series(dtype=float),
                     'ic_t_naive': np.nan, 'ic_t_nw': np.nan,
                     'ls_t_naive': np.nan, 'ls_t_nw': np.nan,
-                    'fm': fama_macbeth_regression(d, factor_col, ret_col)})
+                    'fm': fama_macbeth_regression(d, factor_col, ret_col, min_lags=s - 1)})
         return out
 
     q_min, q_max = q_cum.index.min(), q_cum.index.max()
     out['long_short_return'] = q_cum[q_max] - q_cum[q_min]
     ls_series = (q[q_max] - q[q_min]).dropna()
     out['ls_series'] = ls_series
+    # 重叠窗口的收益序列存在 MA(period-1) 自相关，NW 滞后阶数需覆盖重叠长度
     out['ls_t_naive'] = ls_series.mean() / (ls_series.std(ddof=1) / np.sqrt(len(ls_series))) \
         if len(ls_series) > 2 and ls_series.std(ddof=1) > 0 else np.nan
-    out['ls_t_nw'] = ls_series.mean() / newey_west_se(ls_series) \
+    out['ls_t_nw'] = ls_series.mean() / newey_west_se(ls_series, min_lags=s - 1) \
         if len(ls_series) >= 3 else np.nan
 
     # IC 及其检验
@@ -374,23 +487,25 @@ def _factor_metrics(df, period, factor_col, quantiles=10):
         out['ic_ir'] = ic / ic_series.std() if ic_series.std() > 0 else np.nan
         out['ic_t_naive'] = ic / (ic_series.std(ddof=1) / np.sqrt(len(ic_series))) \
             if ic_series.std(ddof=1) > 0 else np.nan
-        out['ic_t_nw'] = ic / newey_west_se(ic_series)
+        out['ic_t_nw'] = ic / newey_west_se(ic_series, min_lags=s - 1)
 
     # Fama-MacBeth 回归
-    out['fm'] = fama_macbeth_regression(d, factor_col, ret_col)
+    out['fm'] = fama_macbeth_regression(d, factor_col, ret_col, min_lags=s - 1)
     return out
 
 
 def analyze_factor_performance(res_, neutralize=None, quantiles=10,
-                               mkt_cap_col='mkt_cap', industry_col='industry'):
+                               mkt_cap_col='mkt_cap', industry_col='industry',
+                               price_aligned=None, reb_dates=None, rebalance='auto'):
     """对每个持有期计算原始因子指标；若开启中性化，再计算中性化因子指标与诊断。"""
     perform_ = {}
     for period, df in res_.items():
         df = df.copy()
+        pctx = {'price_aligned': price_aligned, 'reb_dates': (reb_dates or {}).get(period)}
         # 原始因子
         df['quantile'] = df.groupby('trade_date')['factor'].transform(
             lambda x: _quantile_transform(x, quantiles))
-        raw = _factor_metrics(df, period, 'factor', quantiles)
+        raw = _factor_metrics(df, period, 'factor', quantiles, rebalance=rebalance, **pctx)
         entry = {
             'quantile_returns': raw['quantile_returns'],
             'long_short_return': raw['long_short_return'],
@@ -411,7 +526,8 @@ def analyze_factor_performance(res_, neutralize=None, quantiles=10,
             else:
                 df = neutralize_factor(df, 'factor', mkt_cap_col, industry_col, mode=neutralize)
                 neut_df = df.dropna(subset=['factor_neutralized'])
-                neut = _factor_metrics(neut_df, period, 'factor_neutralized', quantiles)
+                neut = _factor_metrics(neut_df, period, 'factor_neutralized', quantiles,
+                                       rebalance=rebalance, **pctx)
                 entry['neutralized'] = neut
                 # 市值"马甲"诊断：因子与 log(市值) 的日均秩相关
                 diag = df.dropna(subset=['factor', mkt_cap_col])
@@ -504,11 +620,12 @@ def generate_summary_statistics(perform_, neutralize, rebalance, periods,
 
         q = metrics['returns_pivot']
         target_returns = q[target_q].dropna() if target_q in q.columns else pd.Series(dtype=float)
-        port = calculate_portfolio_metrics(target_returns, rebalance_period_days(rebalance, period))
+        # 重叠窗口下策略收益序列按"1 个调仓窗口"采样，年化口径见 _strategy_period_days
+        port = calculate_portfolio_metrics(target_returns, _strategy_period_days(rebalance, period))
 
         fm = metrics['fm']
         row = {
-            '持有期(天)': period,
+            f'持有期({period_unit(rebalance)})': period,
             '调仓方式': rebalance,
             '因子方向': direction,
             'IC': perf['ic'] if not neutralize else metrics['ic'],
@@ -552,7 +669,7 @@ def generate_summary_statistics(perform_, neutralize, rebalance, periods,
                 if period not in perform_:
                     continue
                 q_series = effective_metrics(perform_[period], neutralize)['quantile_returns']
-                row = {'持有期': period}
+                row = {f'持有期({period_unit(rebalance)})': period}
                 for qq, ret in q_series.items():
                     row[f'Q{qq}'] = ret
                 quantile_rows.append(row)
@@ -565,7 +682,7 @@ def generate_summary_statistics(perform_, neutralize, rebalance, periods,
                     continue
                 eff = effective_metrics(perform_[period], neutralize)
                 for date, v in eff['ic_series'].items():
-                    ic_rows.append({'持有期': period, '日期': date, 'IC值': v})
+                    ic_rows.append({f'持有期({period_unit(rebalance)})': period, '日期': date, 'IC值': v})
             if ic_rows:
                 pd.DataFrame(ic_rows).to_excel(writer, sheet_name='IC时间序列', index=False)
 
@@ -577,7 +694,7 @@ def generate_summary_statistics(perform_, neutralize, rebalance, periods,
                 eff = effective_metrics(perform_[period], neutralize)
                 fm = eff['fm']
                 fm_rows.append({
-                    '持有期': period,
+                    f'持有期({period_unit(rebalance)})': period,
                     'FM斜率(每单位收益)': fm['mean_slope'],
                     'FM斜率(BP)': fm['slope_bp'],
                     'FM_t_naive': fm['t_naive'],
@@ -600,7 +717,7 @@ def generate_summary_statistics(perform_, neutralize, rebalance, periods,
                     perf = perform_[period]
                     raw, neut = perf['metrics'], perf['neutralized']
                     diag_rows.append({
-                        '持有期': period,
+                        f'持有期({period_unit(rebalance)})': period,
                         '原始IC': perf['ic'],
                         '中性化IC': neut['ic'],
                         '原始FM斜率(BP)': raw['fm']['slope_bp'],
@@ -653,14 +770,16 @@ def _quantile_colors():
 
 
 def plot_quantile_returns_separate(perform_, neutralize=None):
-    """每个持有期的分层累计收益曲线（Top/Bottom 组加粗；开启中性化时叠加虚线对比）。"""
+    """每个持有期的分层累计收益曲线（Top/Bottom 组加粗；开启中性化时叠加虚线对比）。
+
+    累计曲线直接基于绩效指标里的 returns_pivot（重叠窗口时已是重建后的真实策略收益），
+    与汇总统计的累计口径保持一致，不再重复算 q。
+    """
     colors = _quantile_colors()
     for period, perf in perform_.items():
-        df = perf['data']
-        ret_col = f'return_{period}d'
-        q = df.groupby(['trade_date', 'quantile'])[ret_col].mean().reset_index()
-        q = pd.pivot_table(q, index='trade_date', columns='quantile', values=ret_col).sort_index()
-        cum = q.add(1).cumprod()
+        cum = _cum_quantiles(perf['metrics'])
+        if len(cum) == 0:
+            continue
 
         # 中性化因子的分层累计（虚线）
         neut_cum = None
@@ -684,7 +803,7 @@ def plot_quantile_returns_separate(perform_, neutralize=None):
             ax.plot([], [], linestyle='--', color='gray', alpha=0.6, label='——虚线 = 中性化后')
 
         suffix = '（实线=原始 / 虚线=中性化）' if neut_cum is not None else ''
-        ax.set_title(f'{period}天 - 分层收益（{REBALANCE}调仓）{suffix}',
+        ax.set_title(f'{period}{period_unit(REBALANCE)} - 分层收益（{REBALANCE}调仓）{suffix}',
                      fontsize=16, fontweight='bold')
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9, framealpha=0.9)
         ax.grid(True, alpha=0.3)
@@ -694,7 +813,7 @@ def plot_quantile_returns_separate(perform_, neutralize=None):
             ax.set_xticks(cum.index[ticks])
             ax.set_xticklabels([d.strftime('%Y-%m-%d') for d in cum.index[ticks]], rotation=45, fontsize=10)
         fig.tight_layout()
-        _finish_fig(fig, f'quantile_returns_{period}d.png')
+        _finish_fig(fig, f'quantile_returns_{period}{period_file_suffix(REBALANCE)}.png')
 
 
 def plot_factor_performance(perfor_, neutralize=None):
@@ -708,7 +827,7 @@ def plot_factor_performance(perfor_, neutralize=None):
     ls = [e['long_short_return'] for e in eff]
     axes[0].bar(range(len(periods)), ls, color='skyblue', alpha=0.8)
     axes[0].set_xticks(range(len(periods)))
-    axes[0].set_xticklabels([f'{p}天' for p in periods])
+    axes[0].set_xticklabels([f'{p}{period_unit(REBALANCE)}' for p in periods])
     axes[0].set_title('多空组合收益', fontweight='bold')
     axes[0].set_ylabel('收益')
     for i, v in enumerate(ls):
@@ -717,7 +836,7 @@ def plot_factor_performance(perfor_, neutralize=None):
     ics = [e['ic'] for e in eff]
     axes[1].bar(range(len(periods)), ics, color='lightcoral', alpha=0.8)
     axes[1].set_xticks(range(len(periods)))
-    axes[1].set_xticklabels([f'{p}天' for p in periods])
+    axes[1].set_xticklabels([f'{p}{period_unit(REBALANCE)}' for p in periods])
     axes[1].set_title('信息系数(IC)', fontweight='bold')
     axes[1].set_ylabel('IC')
     for i, v in enumerate(ics):
@@ -726,7 +845,7 @@ def plot_factor_performance(perfor_, neutralize=None):
     if periods:
         qr = eff[0]['quantile_returns']
         axes[2].plot(qr.index, qr.values, marker='o', linewidth=2, markersize=8, color='blue')
-        axes[2].set_title(f'{periods[0]}天期分位数收益', fontweight='bold')
+        axes[2].set_title(f'{periods[0]}{period_unit(REBALANCE)}期分位数收益', fontweight='bold')
         axes[2].set_xlabel('分位数')
         axes[2].set_ylabel('平均收益')
         axes[2].grid(True, alpha=0.6)
@@ -737,7 +856,7 @@ def plot_factor_performance(perfor_, neutralize=None):
         s = eff[0]['ic_series']
         axes[3].plot(s.index, s.values, linewidth=1, color='purple', alpha=0.7)
         axes[3].axhline(y=s.mean(), color='red', linestyle='--', label=f'均值: {s.mean():.3f}')
-        axes[3].set_title(f'{periods[0]}天期IC时间序列', fontweight='bold')
+        axes[3].set_title(f'{periods[0]}{period_unit(REBALANCE)}期IC时间序列', fontweight='bold')
         axes[3].set_xlabel('日期')
         axes[3].set_ylabel('IC')
         axes[3].legend()
@@ -767,7 +886,7 @@ def plot_ic_distribution(perfor_, neutralize=None):
         ax.hist(neut, bins=40, alpha=0.5, color='#DD8452',
                 label=f'中性化  IC={perf["neutralized"]["ic"]:.4f}  ICIR={perf["neutralized"]["ic_ir"]:.3f}')
     ax.axvline(0, color='gray', linestyle='--', linewidth=1)
-    ax.set_title(f'{p0}天期 IC 分布', fontsize=14, fontweight='bold')
+    ax.set_title(f'{p0}{period_unit(REBALANCE)}期 IC 分布', fontsize=14, fontweight='bold')
     ax.set_xlabel('每日 IC'); ax.set_ylabel('频次')
     ax.legend(fontsize=10); ax.grid(True, alpha=0.3)
     # 右：累计 IC（cumsum，考察信号单调性）
@@ -777,7 +896,7 @@ def plot_ic_distribution(perfor_, neutralize=None):
     if neut is not None and len(neut):
         ax.plot(neut.index, neut.cumsum(), color='#DD8452', linestyle='--', label='中性化', linewidth=1.5)
     ax.axhline(0, color='gray', linestyle='--', linewidth=1)
-    ax.set_title(f'{p0}天期 累计 IC（cumsum）', fontsize=14, fontweight='bold')
+    ax.set_title(f'{p0}{period_unit(REBALANCE)}期 累计 IC（cumsum）', fontsize=14, fontweight='bold')
     ax.set_xlabel('日期'); ax.set_ylabel('累计 IC')
     ax.legend(fontsize=10); ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -809,7 +928,7 @@ def plot_fm_regression(perfor_, neutralize=None):
                    label=f'中性化均值 {neut_fm["mean_slope"]:.5f}')
     ax.axhline(0, color='gray', linewidth=1)
     t_nw = neut_fm['t_nw'] if neut_fm is not None else raw_fm['t_nw']
-    ax.set_title(f'{p0}天期 FM 逐日截面斜率\n(均值BP={raw_fm["slope_bp"]:.1f} · FM_t_NW={t_nw:.2f})',
+    ax.set_title(f'{p0}{period_unit(REBALANCE)}期 FM 逐日截面斜率\n(均值BP={raw_fm["slope_bp"]:.1f} · FM_t_NW={t_nw:.2f})',
                  fontsize=14, fontweight='bold')
     ax.set_xlabel('调仓日'); ax.set_ylabel('截面回归斜率')
     ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
@@ -820,7 +939,7 @@ def plot_fm_regression(perfor_, neutralize=None):
     if neut_fm is not None and len(neut_fm['slope_series']):
         ax.hist(neut_fm['slope_series'], bins=40, alpha=0.5, color='#DD8452', label='中性化')
     ax.axvline(0, color='gray', linestyle='--', linewidth=1)
-    ax.set_title(f'{p0}天期 FM 斜率分布', fontsize=14, fontweight='bold')
+    ax.set_title(f'{p0}{period_unit(REBALANCE)}期 FM 斜率分布', fontsize=14, fontweight='bold')
     ax.set_xlabel('每日斜率'); ax.set_ylabel('频次')
     ax.legend(fontsize=10); ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -847,7 +966,7 @@ def plot_t_value_compare(perfor_, neutralize=None):
         ax.bar(x + width / 2, nw, width, color='#DD8452', label='Newey-West t')
         ax.axhline(1.96, color='green', linestyle='--', linewidth=1, alpha=0.7, label='|t|=1.96')
         ax.set_xticks(x)
-        ax.set_xticklabels([f'{p}天' for p in periods])
+        ax.set_xticklabels([f'{p}{period_unit(REBALANCE)}' for p in periods])
         ax.set_title(title, fontsize=14, fontweight='bold')
         ax.legend(fontsize=9); ax.grid(True, alpha=0.3, axis='y')
         for xi, (a, b) in enumerate(zip(naive, nw)):
@@ -882,7 +1001,7 @@ def plot_neutralization_compare(perfor_):
     for qq in sorted(neut_cum.columns):
         ax.plot(neut_cum.index, neut_cum[qq], linestyle='--', linewidth=1.0,
                 color=colors.get(qq, 'gray'), alpha=0.5)
-    ax.set_title(f'{p0}天期 分位数累计收益（实线=原始 / 虚线=中性化）',
+    ax.set_title(f'{p0}{period_unit(REBALANCE)}期 分位数累计收益（实线=原始 / 虚线=中性化）',
                  fontsize=13, fontweight='bold')
     ax.set_xlabel('日期'); ax.set_ylabel('累计净值'); ax.grid(True, alpha=0.3)
 
@@ -896,7 +1015,7 @@ def plot_neutralization_compare(perfor_):
         ax.plot(neut_ls.index, (1 + neut_ls).cumprod(), color='#DD8452', linestyle='--',
                 label='中性化', linewidth=1.5)
     ax.axhline(1, color='gray', linewidth=1)
-    ax.set_title(f'{p0}天期 多空组合累计净值（Q10−Q1）', fontsize=13, fontweight='bold')
+    ax.set_title(f'{p0}{period_unit(REBALANCE)}期 多空组合累计净值（Q10−Q1）', fontsize=13, fontweight='bold')
     ax.set_xlabel('日期'); ax.set_ylabel('累计净值')
     ax.legend(fontsize=10); ax.grid(True, alpha=0.3)
 
@@ -933,7 +1052,7 @@ def plot_neutralization_compare(perfor_):
     ax.bar(x - width / 2, raw_ics, width, color='#4C72B0', label='原始 IC')
     ax.bar(x + width / 2, neut_ics, width, color='#DD8452', label='中性化 IC')
     ax.axhline(0, color='gray', linewidth=1)
-    ax.set_xticks(x); ax.set_xticklabels([f'{p}天' for p in periods])
+    ax.set_xticks(x); ax.set_xticklabels([f'{p}{period_unit(REBALANCE)}' for p in periods])
     ax.set_title('各持有期 原始 vs 中性化 IC', fontsize=13, fontweight='bold')
     ax.legend(fontsize=10); ax.grid(True, alpha=0.3, axis='y')
     for xi, (a, b) in enumerate(zip(raw_ics, neut_ics)):
@@ -973,11 +1092,14 @@ def main():
     factor_series = price_data[FACTOR]
 
     # 回测（修复问题二：日历化调仓）
-    results = factor_analysis(factor_series, price_data, periods=PERIODS,
-                              quantiles=QUANTILES, rebalance=REBALANCE)
+    results, factor_ctx = factor_analysis(factor_series, price_data, periods=PERIODS,
+                                          quantiles=QUANTILES, rebalance=REBALANCE)
 
     # 表现分析（修复问题三、四：FM 回归 + NW 检验 + 风格中性化）
-    performance = analyze_factor_performance(results, neutralize=NEUTRALIZE, quantiles=QUANTILES)
+    performance = analyze_factor_performance(
+        results, neutralize=NEUTRALIZE, quantiles=QUANTILES,
+        price_aligned=factor_ctx['price_aligned'], reb_dates=factor_ctx['reb_dates'],
+        rebalance=REBALANCE)
 
     summary_df = generate_summary_statistics(performance, NEUTRALIZE, REBALANCE, PERIODS,
                                              output_path=OUTPUT_PATH)

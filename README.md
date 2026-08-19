@@ -45,7 +45,8 @@ fct_backtest/
 **改进版（`fct_backtest改进版.py`）在保留原版全部能力的基础上修复四大问题**
 
 - **每日截面预处理**：MAD / Z-score 统计量只用当日股票，消除全局前视偏差
-- **日历化调仓**：支持 auto / daily / weekly / monthly（月末调仓适配月频/财报因子）
+- **日历化调仓**：支持 auto / daily / weekly / monthly（月末调仓适配月频/财报因子），默认持有期按调仓方式自适应（auto/daily 为 1/5/10/20 天，weekly/monthly 默认 1 个窗口）
+- **重叠窗口策略收益重建**：日历化调仓 + 多持有期（period>1）按"全持仓·等权·重叠加仓"重建真实策略收益，不再对重叠窗口重复复利（修复 daily 20 天多空收益曾虚增至 −844 万% 等假数字），NW 滞后阶数覆盖重叠长度；无重叠场景口径逐点不变
 - **Fama-MacBeth 回归**：逐日截面回归求风险溢价斜率（BP），并做 **Newey-West 自相关修正**（IC / 多空 / 斜率三个 t 值）
 - **市值 + 行业中性化**：Barra 风格残差化剥离市值与行业，输出原始 vs 中性化对比及市值相关诊断
 - **Excel 结果导出**：五个 Sheet（新增 `FM回归与NW检验`、`中性化诊断`）
@@ -110,11 +111,14 @@ python fct_backtest改进版.py
 ### 3. 调整改进版参数（环境变量）
 
 ```bash
-# 例：回测 fct_1，月末调仓，持有 1 个月，5 组，市值+行业中性化
-# （图表会自动保存到 code/figs/；此例只有 1 个持有期，故分层曲线只有 1 张）
-FCT_FACTOR=fct_1 FCT_REBALANCE=monthly FCT_PERIODS=1 \
+# 例：回测 fct_1，月末调仓，5 组，市值+行业中性化
+# （月频默认持有期=(1,)，即"持有 1 个月"；图表自动保存到 code/figs/，只有 1 张分层曲线）
+FCT_FACTOR=fct_1 FCT_REBALANCE=monthly \
 FCT_QUANTILES=5 FCT_NEUTRALIZE=mktcap_industry \
 python fct_backtest改进版.py
+
+# 如需月频多窗口（持有 1/3/6/12 个月），显式指定 FCT_PERIODS：
+FCT_REBALANCE=monthly FCT_PERIODS=1,3,6,12 python fct_backtest改进版.py
 ```
 
 参数详见 [改进版框架说明](说明文档/改进版框架说明.md)。
@@ -291,7 +295,7 @@ results = factor_analysis(factor_df, price_data, periods=(1, 5, 10), quantiles=5
 
 - 不考虑交易成本（手续费、滑点、冲击成本）
 - 未处理涨跌停/停牌等不可交易场景
-- 非重叠采样导致样本量大幅损失
+- 无重叠采样（`auto`）会损失样本量；日历化调仓 + 多持有期则按重叠加仓重建真实策略收益（见 [改进版框架说明](说明文档/改进版框架说明.md) §5.4）
 - 未计算换手率，无法评估调仓成本
 - 组内默认等权，未考虑权重优化
 
