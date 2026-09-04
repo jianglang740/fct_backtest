@@ -1,26 +1,28 @@
 # 单因子回测框架 (Single Factor Backtest Framework)
 
-一个面向 A 股市场的单因子量化回测框架，支持因子构建、预处理、分层回测、绩效归因和可视化。
+一个面向 A 股市场的单因子量化回测框架，支持因子接入、预处理、分层回测、绩效归因和可视化。
 
 ## 项目结构
 
 ```
 fct_backtest/
-├── fct_backtest注释版.py          # 主回测脚本（详细注释版，推荐阅读）
-├── fct_backtest无冗余版.py         # 主回测脚本（精简版，适合快速运行）
-├── fct_backtest改进版.py           # 主回测脚本（改进版：每日截面预处理/ 日历化调仓/FM回归+Newey-West/市值行业中性化）
-├── price_data.parquet             # 行情数据（含 mkt_cap 市值 / industry 行业，Git LFS 托管）
-├── fct_df.parquet                 # 因子数据（Git LFS 托管）
-├── 图片/                          # 回测输出图表
+├── code/                          # 全部代码与数据
+│   ├── fct_backtest注释版.py      # 原版主回测脚本（详细注释版，适合学习原理）
+│   ├── fct_backtest无冗余版.py    # 原版同逻辑精简版
+│   ├── fct_backtest改进版.py      # 改进版：每日截面预处理 / 日历化调仓 / FM回归+Newey-West / 市值行业中性化
+│   ├── price_data.parquet         # 行情数据（15 列，含 mkt_cap 市值 / industry 行业；Git LFS 托管）
+│   ├── fct_df.parquet             # 因子数据（当前为 fct_1 / fct_2 两列；Git LFS 托管）
+│   ├── 因子回测统计结果.xlsx      # 运行产物（无冗余版 / 改进版输出，示例）
+│   └── figs/                      # 改进版运行后自动保存的 PNG 图表（每次运行清空重建）
+├── 图片/                          # 原版早期运行沉淀的历史图表
 │   ├── Figure_1~5.png             # 分层收益曲线 + 绩效仪表盘
 │   └── IC时序图.png               # IC 时间序列图
-├── 说明文档/
-│   ├── 改进版框架说明.md           # 改进版四大改进、新指标、用法详解
-│   ├── 数据说明报告.md             # 两份数据的字段、统计特征详解
-│   ├── 数据透视与回测原理说明.md    # 长表⇄宽表转换与回测原理拆解
-│   ├── 回测流程图.md               # 原版 + 改进版 Mermaid 流程图
-│   ├── parquet文件格式.md          # Parquet vs CSV 对比及行业最佳实践
-│   └── 该框架的局限性.md           # 框架优缺点分析，实盘适用性评估
+├── 说明文档/                      # 使用与原理文档
+│   ├── 改进版框架说明.md          # 改进版四大改进、新指标、用法详解
+│   ├── 数据说明报告.md            # 两份数据的字段、统计特征详解
+│   ├── 数据透视与回测原理说明.md   # 长表⇄宽表转换与回测原理拆解
+│   ├── parquet文件格式.md         # Parquet vs CSV 对比及行业最佳实践
+│   └── 该框架的局限性.md          # 框架优缺点分析，实盘适用性评估
 └── README.md
 ```
 
@@ -28,7 +30,7 @@ fct_backtest/
 
 **原版（注释版 / 无冗余版）**
 
-- **因子构建**：内置经典动量因子生成脚本，支持多窗口（20/60/120 日）
+- **因子即插即用**：因子来自 `fct_df.parquet`（当前 `fct_1` / `fct_2` 两列），脚本自动对全部因子列做预处理；默认回测其中一列（注释版 `fct_2`、无冗余版 `fct_1`），新增因子列即可直接回测
 - **稳健的数据预处理**：MAD 缩尾去极值（中位数 ± 5.2×MAD）+ Z-Score 标准化
 - **严格的样本池过滤**：自动剔除 ST 股票和上市不足一年的次新股
 - **多持有期分层回测**：支持 1/5/10/20 天持有期，每个交易日按因子值等分为 10 组
@@ -83,25 +85,27 @@ git lfs pull
 
 ### 2. 运行回测
 
+> 三个脚本的数据路径约定不同：注释版按**当前目录**读数据（需 `cd code` 运行）；无冗余版按仓库根目录相对路径读数据；改进版按脚本自身位置定位，任意目录可运行。
+
 ```bash
-# 注释版（推荐，适合学习理解）
-python fct_backtest注释版.py
+# 改进版（推荐，功能最全；默认 fct_2 + 月末调仓 + 市值行业中性化）
+python code/fct_backtest改进版.py
 
-# 精简版（适合快速运行）
-python fct_backtest无冗余版.py
+# 原版注释版（适合学习原理；在 code/ 目录内运行，默认回测 fct_2）
+cd code && python fct_backtest注释版.py
 
-# 改进版（每日截面预处理 / 日历化调仓 / FM回归+Newey-West / 市值行业中性化）
-python fct_backtest改进版.py
+# 原版精简版（在仓库根目录运行，默认回测 fct_1）
+python code/fct_backtest无冗余版.py
 ```
 
 运行后将输出：
 
 - 控制台打印预处理后的数据概览和汇总统计表
-- 所有图表保存到 `code/figs/`：分层收益曲线（每持有期一张）+ 绩效仪表盘 + IC 分布 + FM 回归 + t 值对比（+ 中性化对比仪表盘）
-- 生成 Excel 统计结果：注释版 → `单因子回测统计结果.xlsx`（3 Sheet）；无冗余版 / 改进版 → `因子回测统计结果.xlsx`（改进版 5 Sheet）
+- 改进版的所有图表**自动保存**到 `code/figs/`：分层收益曲线（每持有期一张）+ 绩效仪表盘 + IC 分布 + FM 回归 + t 值对比（+ 中性化对比仪表盘）；注释版 / 无冗余版则弹出图表窗口（`plt.show()`，不自动存图）
+- 生成 Excel 统计结果：注释版 → `code/单因子回测统计结果.xlsx`（3 Sheet）；无冗余版 / 改进版 → `code/因子回测统计结果.xlsx`（改进版 5 Sheet）
+  - 注意：无冗余版与改进版共用 `code/因子回测统计结果.xlsx` 这个文件名，后运行者会覆盖前者产物
 
-> 首次使用改进版前，先用米筐环境拉取市值/行业数据（仅需一次）：
-> `/opt/anaconda3/envs/Ricequant_SDK/bin/python 构造市值行业数据.py`
+> 数据说明：`price_data.parquet` 已含 `mkt_cap`（市值）与 `industry`（申万一级行业）两列（共 15 列），开箱即可跑市值/行业中性化，**无需**再额外拉取数据。
 
 ### 3. 调整改进版参数（环境变量）
 
@@ -110,51 +114,40 @@ python fct_backtest改进版.py
 # （月频默认持有期=(1,)，即"持有 1 个月"；图表自动保存到 code/figs/，只有 1 张分层曲线）
 FCT_FACTOR=fct_1 FCT_REBALANCE=monthly \
 FCT_QUANTILES=5 FCT_NEUTRALIZE=mktcap_industry \
-python fct_backtest改进版.py
+python code/fct_backtest改进版.py
 
 # 如需月频多窗口（持有 1/3/6/12 个月），显式指定 FCT_PERIODS：
-FCT_REBALANCE=monthly FCT_PERIODS=1,3,6,12 python fct_backtest改进版.py
+FCT_REBALANCE=monthly FCT_PERIODS=1,3,6,12 python code/fct_backtest改进版.py
 ```
 
 参数详见 [改进版框架说明](说明文档/改进版框架说明.md)。
 
-### 4. 构建自定义因子
+### 4. 新增 / 切换测试因子
 
-使用 `构造动量因子.py` 生成动量因子，或参考其逻辑构建你自己的因子：
-
-```bash
-python 构造动量因子.py
-```
-
-该脚本基于 `price_data.parquet` 中的后复权收盘价，生成 20 日、60 日、120 日三个窗口的动量因子，输出到 `fct_df.parquet`。
-
-### 5. 切换测试因子
-
-修改主回测脚本底部 `main` 中的因子选择：
+因子即 `fct_df.parquet` 中的列（当前为 `fct_1` / `fct_2`）。新增因子只需把因子按相同索引（`trade_date`, `code`）作为新列写入 `fct_df.parquet`：
 
 ```python
-# 测试 mom_20d
-factor_df = price_data['mom_20d']
+import pandas as pd
 
-# 或测试 mom_60d / mom_120d
-factor_df = price_data['mom_60d']
+fct_df = pd.read_parquet('code/fct_df.parquet')
+fct_df['fct_3'] = your_factor_series   # 自定义因子，索引须与 fct_df 对齐
+fct_df.to_parquet('code/fct_df.parquet')
 ```
 
-### 6. 调整持有期
+切换被测因子：
 
-修改 `factor_analysis` 调用的 `periods` 参数：
+- 改进版：`FCT_FACTOR=fct_3 python code/fct_backtest改进版.py`
+- 注释版 / 无冗余版：改脚本底部 `#### 因子回测 ####` 段的 `factor_df = price_data['fct_1']`（或 `'fct_2'`）一行即可
+
+### 5. 调整持有期 / 分位数
+
+- 注释版 / 无冗余版：修改脚本底部 `factor_analysis(...)` 调用的 `periods` 与 `quantiles` 参数：
 
 ```python
-results = factor_analysis(factor_df, price_data, periods=(1, 5, 10, 20), quantiles=10)
+results = factor_analysis(factor_df, price_data, periods=(1, 5, 10, 20, 60), quantiles=10)
 ```
 
-### 7. 生成 IC 时序图
-
-```bash
-python ic.py
-```
-
-从回测输出的 Excel 中读取 IC 时间序列，绘制带统计标注的专业 IC 走势图。
+- 改进版：用环境变量 `FCT_PERIODS`（月频下单位是"月"，如 `1,3,6,12` = 持有 1/3/6/12 个月）与 `FCT_QUANTILES`，见第 3 步示例。
 
 ## 回测流程
 
@@ -186,7 +179,7 @@ python ic.py
                                      结果输出（Excel 5 Sheet + 图表）
 ```
 
-完整的 Mermaid 流程图见 [回测流程图](说明文档/回测流程图.md)。
+两版的流程与改进点逐条拆解见 [改进版框架说明](说明文档/改进版框架说明.md)，回测原理详解见 [数据透视与回测原理说明](说明文档/数据透视与回测原理说明.md)。
 
 ## 核心方法论
 
@@ -222,25 +215,25 @@ python ic.py
 ## 代码结构
 
 ```
-fct_backtest注释版.py / fct_backtest无冗余版.py
+code/fct_backtest注释版.py / code/fct_backtest无冗余版.py   # 均为脚本级执行（无 main() 入口）
 ├── extreme_MAD()                # MAD 缩尾去极值
 ├── standardize_z()              # Z-Score 标准化
-├── preprocess_data()            # 样本池过滤
+├── preprocess_data()            # 样本池过滤（去 ST / 次新）
 ├── factor_analysis()            # 核心：分层回测（长→宽→shift→收益→分10组）
 ├── analyze_factor_performance() # IC/ICIR/分位收益/多空收益
-├── determine_factor_direction() # 判断正向/负向因子
 ├── calculate_portfolio_metrics()# 夏普/索提诺/卡玛/最大回撤
+├── determine_factor_direction() # 判断正向/负向因子
 ├── generate_summary_statistics()# 输出 Excel 三 Sheet
-├── plot_quantile_returns_separate()# 分层累计收益曲线
+├── plot_quantile_returns_separate()  # 分层累计收益曲线
 ├── plot_factor_performance()    # 绩效仪表盘（2×2）
-└── main                         # 数据加载 → 预处理 → 回测 → 输出
+└── 文件底部模块级流程           # 读数据 → 预处理 → 单因子回测 → 导出 → 弹窗绘图
 
-fct_backtest改进版.py（在注释版基础上重构）
+code/fct_backtest改进版.py（在注释版基础上重构，入口 main()）
 ├── extreme_MAD() / standardize_z()      # 每日截面版（配合 groupby transform 使用）
 ├── preprocess_data()                    # 样本池过滤（先过滤，后算截面统计量）
 ├── preprocess_factors()                 # 逐日截面 MAD + Z-score + fillna(0)
 ├── build_rebalance_dates()              # 日历化调仓：auto/daily/weekly/monthly
-├── rebalance_period_days()              # 各调仓方式折算年化口径（21/5/period）
+├── rebalance_period_days() / period_unit()  # 各调仓方式折算年化口径（21/5/period）
 ├── factor_analysis()                    # 窗口锚定收益 + 截面分层（携带市值/行业）
 ├── newey_west_se()                      # Newey-West HAC 修正标准误（Bartlett 权重）
 ├── fama_macbeth_regression()            # 逐日截面 OLS → 平均斜率(BP) + naive/NW t
@@ -250,39 +243,38 @@ fct_backtest改进版.py（在注释版基础上重构）
 ├── effective_metrics() / determine_factor_direction()
 ├── generate_summary_statistics()        # 输出 Excel 五 Sheet
 ├── plot_quantile_returns_separate() / plot_factor_performance()
-└── main                                 # 支持 FCT_* 环境变量覆盖参数
-
-构造市值行业数据.py（数据拉取，米筐环境）
-├── to_rq_code() / to_local_code()       # 本地后缀 ⇄ 米筐后缀（.SZ/.XSHE）
-├── pull_market_cap()                    # rqdatac market_cap 因子，分块拉取
-├── pull_industry_at()                   # 申万一级行业（单日期）
-├── build_industry_series()              # 月度锚点 + 前向填充
-└── main                                 # 备份 → 拉取 → 写回 → 覆盖率诊断
+├── plot_ic_distribution() / plot_fm_regression() / plot_t_value_compare()
+├── plot_neutralization_compare()        # 中性化对比仪表盘
+└── main()                               # 支持 FCT_* 环境变量覆盖参数
 ```
 
 ## 扩展指南
 
 ### 添加新因子
 
-在 `fct_df.parquet` 中新增一列（如 `mom_180d`），或修改 `构造动量因子.py` 中的 `momentum_windows` 字典添加新窗口。主回测脚本中的 `factor_names = fct_df.columns` 会自动识别所有因子列。
+因子即 `fct_df.parquet` 的列（当前 `fct_1` / `fct_2`）。主回测脚本会通过 `factor_names = fct_df.columns` 自动识别全部因子列并做预处理；新增因子 = 把自定义因子按相同索引（`trade_date`, `code`）写入新列，再用 `FCT_FACTOR`（改进版）或改脚本底部一行（原版）指定被测因子，示例见上文「快速开始 · 4. 新增/切换测试因子」。
 
 ### 自定义持有期
 
 ```python
-# 例如增加 60 天（季度）持有期
+# 例如增加 60 天（季度）持有期（注释版 / 无冗余版：改脚本底部 factor_analysis 调用）
 results = factor_analysis(factor_df, price_data, periods=(1, 5, 10, 20, 60), quantiles=10)
 ```
+
+改进版用环境变量 `FCT_PERIODS`（单位随调仓方式变化，monthly 下为"月"，如 `1,3,6,12`）。
 
 ### 调整分位数
 
 ```python
-# 改为 5 组
+# 改为 5 组（注释版 / 无冗余版）
 results = factor_analysis(factor_df, price_data, periods=(1, 5, 10), quantiles=5)
 ```
 
+改进版用 `FCT_QUANTILES` 环境变量。
+
 ### 改为每日截面 MAD 缩尾
 
-原版 `extreme_MAD` 使用全局静态阈值（对全时段所有股票一起计算）。改进版已改为每日截面缩尾（`groupby(level='trade_date').transform()`），直接运行 `fct_backtest改进版.py` 即可，详见 [改进版框架说明](说明文档/改进版框架说明.md)。
+原版 `extreme_MAD` 使用全局静态阈值（对全时段所有股票一起计算）。改进版已改为每日截面缩尾（`groupby(level='trade_date').transform()`），直接运行 `code/fct_backtest改进版.py` 即可，详见 [改进版框架说明](说明文档/改进版框架说明.md)。
 
 ## 框架局限性
 
@@ -305,6 +297,5 @@ results = factor_analysis(factor_df, price_data, periods=(1, 5, 10), quantiles=5
 | [改进版框架说明](说明文档/改进版框架说明.md)                 | 了解改进版四大改进、新指标与用法       |
 | [数据说明报告](说明文档/数据说明报告.md)                     | 初次接触，理解两份数据                 |
 | [数据透视与回测原理说明](说明文档/数据透视与回测原理说明.md) | 理解长表⇄宽表转换为什么是回测核心     |
-| [回测流程图](说明文档/回测流程图.md)                         | 全局视角，原版 + 改进版 Mermaid 流程图 |
 | [parquet文件格式](说明文档/parquet文件格式.md)               | 理解为什么量化用 Parquet 而非 CSV      |
 | [该框架的局限性](说明文档/该框架的局限性.md)                 | 评估框架是否适合你的场景               |
